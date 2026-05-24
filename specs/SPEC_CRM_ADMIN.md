@@ -99,7 +99,7 @@ A single command center where every financial event, customer interaction, proje
 |---|---|---|---|
 | Customer | Financial | Conformist | `CustomerCreated` → auto-create billing profile |
 | Financial (Invoice) | Financial (Payment) | Published Language | `InvoiceIssued` → payment can reference it |
-| Operations (Order) | Financial (Invoice) | ACL (Anti-Corruption Layer) | `OrderCompleted` → trigger invoice generation |
+| Operations (Order) | Financial (Invoice) | ACL (Anti-Corruption Layer) | `OrderCompleted` → Invoice context owns creation + numbering; Order stores `invoiceId` after `OrderInvoiceLinked` integration event |
 | Operations (Project) | Governance (Accountability) | Domain Events | `ProjectMilestoneReached` → log accountability entry |
 | Financial (Payment) | Financial (Receipt) | Event-Carried State Transfer | `PaymentReceived` → auto-generate receipt |
 | Governance (Users) | ALL | Shared Kernel | User identity referenced across all contexts |
@@ -121,7 +121,7 @@ Customer (Aggregate Root)
 ├── company?: string
 ├── tags: Tag[]
 ├── addresses: Address[]            // Value Object[]
-├── notes: Note[]                   // Entity
+├── notes: Note[]                   // Entity — Note.type: 'note' | 'call' | 'email' | 'meeting'; reused for interaction history
 ├── status: CustomerStatus          // Active | Archived | Prospect
 ├── source: AcquisitionSource       // Referral | Organic | Direct | Other
 ├── createdAt: Timestamp
@@ -168,14 +168,14 @@ Invoice (Aggregate Root)
 - Cannot issue an invoice with zero line items.
 - Cannot mark as Paid without a linked Payment aggregate.
 - `dueDate` must be ≥ `issuedAt`.
-- Cannot void/cancel a Paid invoice (must issue credit note).
+- Cannot void/cancel a Paid invoice. Paid invoices are immutable in V1. CreditNote aggregate is deferred to V2.
 
 #### Aggregate: `Payment`
 
 ```
 Payment (Aggregate Root)
 ├── paymentId: PaymentId
-├── invoiceId?: InvoiceId            // Optional — standalone payments exist
+├── invoiceId?: InvoiceId            // Optional — standalone = non-invoice income (owner contribution, investment proceeds, misc income)
 ├── customerId?: CustomerId
 ├── amount: Money
 ├── currency: CurrencyCode
@@ -183,7 +183,7 @@ Payment (Aggregate Root)
 ├── reference?: string               // External ref (transaction ID, check #)
 ├── status: PaymentStatus            // Pending | Completed | Failed | Refunded
 ├── receivedAt: Timestamp
-├── reconciled: boolean
+├── reconciled: boolean              // Manual bookkeeping flag: user marks payment verified against bank statement or external ledger
 ├── createdAt: Timestamp
 └── updatedAt: Timestamp
 ```
@@ -208,9 +208,36 @@ Expense (Aggregate Root)
 ├── date: Timestamp
 ├── isDeductible: boolean
 ├── tags: Tag[]
-├── status: ExpenseStatus            // Pending | Approved | Rejected | Reimbursed
+├── status: ExpenseStatus            // Pending | Approved | Reimbursed  (V1: auto-approved on create; single-user self-approval. Rejected removed.)
 ├── createdAt: Timestamp
 └── updatedAt: Timestamp
+```
+
+**ExpenseCategory Enum (V1 defaults — extensible via `/system/config`):**
+
+```typescript
+enum ExpenseCategory {
+  // Operations
+  Office       = 'Office',
+  Software     = 'Software',
+  Hardware     = 'Hardware',
+  Utilities    = 'Utilities',
+  // People
+  Contractors  = 'Contractors',
+  Payroll      = 'Payroll',
+  // Travel & Meals
+  Travel       = 'Travel',
+  Meals        = 'Meals',
+  // Finance
+  BankFees     = 'BankFees',
+  Taxes        = 'Taxes',
+  Insurance    = 'Insurance',
+  // Other
+  Marketing    = 'Marketing',
+  Maintenance  = 'Maintenance',
+  Other        = 'Other',
+}
+// Custom categories stored in /system/config and allowed as string literals after validation.
 ```
 
 #### Aggregate: `Receipt`
@@ -224,7 +251,7 @@ Receipt (Aggregate Root)
 ├── amount: Money
 ├── date: Timestamp
 ├── attachmentUrl: string            // Firebase Storage ref
-├── ocrData?: OcrExtraction          // Value Object — future OCR
+├── ocrData?: OcrExtraction          // Value Object — V2 only; field reserved but no processing path in V1
 ├── verified: boolean
 ├── createdAt: Timestamp
 └── updatedAt: Timestamp
@@ -330,7 +357,7 @@ Purchase (Aggregate Root)
 │   ├── unitCost: Money
 │   └── received: boolean
 ├── totalCost: Money
-├── status: PurchaseStatus           // Requested | Approved | Ordered | Received | Cancelled
+├── status: PurchaseStatus           // Requested | Ordered | Received | Cancelled  (V1: no approval step; Approved removed; advances to Ordered on submit)
 ├── expenseId?: ExpenseId
 ├── projectId?: ProjectId
 ├── expectedDelivery?: Timestamp
@@ -350,7 +377,7 @@ Project (Aggregate Root)
 ├── startDate?: Timestamp
 ├── deadline?: Timestamp
 ├── budget: Money
-├── spent: Money                     // Derived from linked expenses/purchases
+// NOTE: `spent` removed from aggregate — projection-only to avoid derived state on aggregate root. See ProjectBudgetProjection.
 ├── milestones: Milestone[]          // Entity
 │   ├── milestoneId: MilestoneId
 │   ├── title: string
@@ -400,7 +427,7 @@ Investment (Aggregate Root)
 ├── quantity: number
 ├── currentPrice: Money              // Manually updated or via integration
 ├── totalValue: Money                // quantity * currentPrice
-├── unrealizedGain: Money            // totalValue - (purchasePrice * quantity)
+// NOTE: `unrealizedGain` removed from aggregate — projection-only. See InvestmentPortfolioProjection. Formula: totalValue - (purchasePrice * quantity).
 ├── status: InvestmentStatus         // Active | Sold | Matured | WrittenOff
 ├── soldAt?: Timestamp
 ├── salePrice?: Money
@@ -650,7 +677,7 @@ interface GetProjectProfitabilityQuery {
 | Language | TypeScript 5.x (strict mode) |
 | Event Store | Firestore (events collection, partitioned by aggregate) |
 | Read Models | Firestore (separate collections per projection) |
-| Event Bus | In-process EventEmitter (V1) → Cloud Pub/Sub (V2) |
+| Event Bus | In-process EventEmitter (V1) → Cloud Pub/Sub (V2); `IEventBus` abstraction in `application/events/bus/` enables drop-in adapter swap with no domain/application changes |
 | Command Bus | Custom in-process bus with middleware pipeline |
 | Query Bus | Custom in-process bus |
 | Auth | Firebase Admin SDK (token verification) |
@@ -888,12 +915,13 @@ Root Collections:
 /rm_accountability/{entryId}             → Accountability tracker read model
 /rm_users/{userId}                       → User list read model
 
-/rm_dashboard/{userId}                   → Aggregated dashboard KPIs
+/rm_dashboard/{userId}                   → Aggregated dashboard KPIs (per-user for forward-compat; V1 = single doc)
 /rm_monthly_summary/{yyyy-mm}            → Monthly financial summaries
 /rm_cash_flow/{yyyy-mm}                  → Cash flow projections
 
-/system/config                           → App config, categories, enums
-/system/sequences                        → Auto-increment counters (invoice #)
+/system/config                           → App config, categories, enums (incl. custom ExpenseCategory values)
+/system/sequences                        → Auto-increment counters (invoice #) — incremented via Firestore transaction for concurrency safety
+/system/projection_checkpoints/{id}      → Cursor/checkpoint per projection for safe replay without full event scan
 ```
 
 ### Cloud Functions
@@ -912,6 +940,26 @@ schedule('every 24 hours').onRun(async () => {
   await assetService.runDepreciationCycle();
 });
 ```
+
+### Firestore Security Rules Strategy
+
+```
+// firestore.rules — default deny all direct client writes.
+// Backend (Firebase Admin SDK / service account) bypasses rules entirely.
+// Rules are a safety net for misconfigured clients, not the primary auth gate.
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Deny all direct client reads/writes — all access via backend API
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+```
+
+> **Rationale:** All reads/writes go through the Express backend which uses Firebase Admin SDK (bypasses security rules). Direct client Firestore access is intentionally blocked. Firestore rules act as a last-resort safety net.
 
 ---
 
@@ -966,7 +1014,7 @@ type Permission =
 | # | Module | Aggregate | Key Use Cases |
 |---|---|---|---|
 | 1 | **Customers** | Customer | Add/edit customers, tag, track interaction history, link to invoices/orders/projects |
-| 2 | **Invoices** | Invoice | Draft, issue, track payment status, generate PDF, send reminders |
+| 2 | **Invoices** | Invoice | Draft, issue, track payment status, generate downloadable PDF (V1: manual send; no email automation) |
 | 3 | **Payments** | Payment | Record inbound payments, link to invoices, reconcile, track methods |
 | 4 | **Expenses** | Expense | Log outgoing money, categorize, link receipts, allocate to projects |
 | 5 | **Receipts** | Receipt | Upload/photograph receipts, link to expenses/payments, future OCR |
@@ -988,19 +1036,19 @@ type Permission =
 | Projection | Source Events | Purpose |
 |---|---|---|
 | `CustomerListProjection` | CustomerCreated, Updated, Archived | Paginated customer table |
-| `CustomerDetailProjection` | All Customer + linked Invoice, Order, Project events | 360° customer view |
+| `CustomerDetailProjection` | All Customer events + `InvoiceIssued`, `OrderPlaced`, `ProjectCreated` integration events (not raw foreign domain events) | 360° customer view |
 | `InvoiceListProjection` | InvoiceDrafted, Issued, MarkedPaid, Voided | Invoice table with status filters |
 | `PaymentLedgerProjection` | PaymentRecorded, Completed, Refunded | Full payment history |
 | `ExpenseByCategoryProjection` | ExpenseRecorded, Categorized | Category breakdown charts |
 | `MonthlyFinancialSummary` | Invoice, Payment, Expense events | Revenue, costs, profit per month |
 | `CashFlowProjection` | Payment, Expense, Bill, Subscription events | Running cash flow timeline |
-| `SubscriptionBurnProjection` | SubscriptionStarted, Renewed, Cancelled | Monthly SaaS burn rate |
+| `SubscriptionBurnProjection` | SubscriptionStarted, Renewed, Cancelled | Monthly SaaS burn rate — normalized: `monthlyBurn = amount / cycleMonths` where cycleMonths ∈ {1, 3, 12} |
 | `ProjectBudgetProjection` | Expense, Purchase events allocated to projects | Budget utilization per project |
 | `InvestmentPortfolioProjection` | InvestmentAcquired, PriceUpdated, Sold | Portfolio valuation + P&L |
 | `AssetDepreciationProjection` | AssetRegistered, Depreciated, Disposed | Asset book value over time |
 | `DashboardKPIProjection` | Aggregation of all above | Single-read dashboard payload |
-| `AccountabilityScoreProjection` | AccountabilityEntry events | Goal completion rates |
-| `ActivityTimelineProjection` | ALL events | Unified cross-module activity feed |
+| `AccountabilityScoreProjection` | AccountabilityEntry events | Goal completion rates — V1 formula: `completionRate = completed / (completed + failed)`; "on track" = open entries where `targetDate ≥ today` |
+| `ActivityTimelineProjection` | Allowlisted lifecycle events only (e.g. `*Created`, `*Issued`, `*Paid`, `*Completed`, `*Cancelled` — not internal mutation events) | Unified cross-module activity feed — paginated, 500-entry retention per user |
 
 ---
 
@@ -1034,7 +1082,7 @@ GET    /api/v1/dashboard                           → Aggregated KPIs
 GET    /api/v1/reports/cash-flow?year=2026
 GET    /api/v1/reports/expense-breakdown?month=2026-04
 
-POST   /api/v1/receipts/upload                     → Multipart file upload
+POST   /api/v1/receipts/upload                     → Dispatches UploadReceipt command → stores file in Firebase Storage → emits ReceiptUploaded event → returns receiptId immediately
 ```
 
 ---
@@ -1083,6 +1131,34 @@ Unknown             → 500
 ### Audit Trail
 
 Every state change is inherently audited via event sourcing. The `metadata.userId` and `metadata.timestamp` on each event provide a complete audit log. The `/events` endpoint per aggregate exposes this for UI consumption.
+
+### CORS Configuration
+
+```typescript
+// Explicit allowlist from environment variables — no wildcard in production
+const corsConfig: CorsOptions = {
+  origin: [
+    process.env.FRONTEND_ORIGIN_LOCAL ?? 'http://localhost:5173',
+    process.env.FRONTEND_ORIGIN_PROD,     // e.g. https://nexuscommand.app
+  ].filter(Boolean),
+  credentials: true,
+};
+```
+
+### Rate Limiting
+
+```typescript
+// V1: per-IP in-memory limiter (no Redis dependency)
+// 100 requests per 15-minute window per IP
+const rateLimitMiddleware = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+```
+
+> **V2 note:** Replace in-memory store with Redis (e.g., `rate-limit-redis`) for multi-instance deployments.
 
 ---
 
@@ -1149,6 +1225,27 @@ Every state change is inherently audited via event sourcing. The `metadata.userI
 
 ## 19. Directory Structures
 
+### Monorepo Root
+
+The project is a monorepo with three packages: `client/`, `server/`, and `shared/`.
+
+```
+/
+├── client/                  # React SPA
+├── server/                  # Express + Firebase Cloud Functions
+├── shared/                  # @nexus/shared workspace package
+│   ├── src/
+│   │   ├── schemas/         # Zod schemas for commands, responses, DTOs
+│   │   ├── enums/           # All enum definitions (ExpenseCategory, etc.)
+│   │   └── types/           # Shared TypeScript types (branded IDs, Money, etc.)
+│   ├── package.json         # name: "@nexus/shared"
+│   └── tsconfig.json
+├── package.json             # pnpm/npm workspaces config
+└── turbo.json               # Turborepo config (optional)
+```
+
+> Both `client/` and `server/` declare `"@nexus/shared": "workspace:*"` in their `package.json` dependencies. Type safety across the API boundary is enforced at compile time.
+
 ### Backend
 
 ```
@@ -1212,7 +1309,7 @@ server/
 │   │   │   │   └── InProcessEventBus.ts
 │   │   │   └── reactors/
 │   │   │       ├── InvoicePaidReactor.ts
-│   │   │       ├── BillRecurrenceReactor.ts
+│   │   │       ├── BillRecurrenceReactor.ts    # Creates new Bill aggregate on trigger (never mutates a paid bill)
 │   │   │       └── SubscriptionRenewalReactor.ts
 │   │   ├── dto/
 │   │   │   ├── CustomerDTO.ts
@@ -1255,9 +1352,9 @@ server/
 │   │
 │   ├── shared/
 │   │   ├── validation/
-│   │   │   └── schemas.ts               # Zod schemas (shared w/ frontend)
+│   │   │   └── schemas.ts               # Re-exports from @nexus/shared workspace package
 │   │   └── constants/
-│   │       └── enums.ts
+│   │       └── enums.ts                 # Re-exports from @nexus/shared workspace package
 │   │
 │   └── main.ts                          # App entry point
 │

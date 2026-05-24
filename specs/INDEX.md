@@ -2,7 +2,7 @@
 
 > **Version:** 0.1.0-spec
 > **Date:** 2026-04-07
-> **Total Modules:** 16 (Foundation + 15 Feature Modules + Dashboard)
+> **Total Modules:** 17 (1 Foundation + 15 Feature Modules + 1 Dashboard)
 
 ---
 
