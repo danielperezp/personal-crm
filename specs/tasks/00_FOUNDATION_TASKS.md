@@ -8,16 +8,20 @@
 
 ## 1. Monorepo Scaffolding
 
-- [ ] T-0001: Initialize root monorepo with npm/yarn/pnpm workspaces configuration
-- [ ] T-0002: Create `server/` workspace with `package.json` and TypeScript config (`tsconfig.json` strict mode)
-- [ ] T-0003: Create `client/` workspace with `package.json` and Vite + React + TypeScript scaffold
+- [ ] T-0001: Choose **pnpm** as package manager; initialize root `package.json` with `"packageManager": "pnpm@9.x"` and `"workspaces": ["shared", "server", "client", "functions"]`
+- [ ] T-0002: Create `server/` workspace with `package.json` and TypeScript config (`tsconfig.json` strict mode, `composite: true`, references `shared/`)
+- [ ] T-0003: Create `client/` workspace with `package.json` and Vite + React + TypeScript scaffold (`pnpm create vite@latest client -- --template react-ts`)
 - [ ] T-0004: Create `functions/` workspace with `package.json` for Firebase Cloud Functions
-- [ ] T-0005: Create `shared/` workspace with `package.json` for cross-workspace types and schemas
-- [ ] T-0006: Configure workspace cross-references (shared → server, shared → client)
-- [ ] T-0007: Add root-level scripts: `dev`, `build`, `test`, `lint` for all workspaces
-- [ ] T-0008: Add `.gitignore`, `.editorconfig`, `.nvmrc` (Node 20+)
-- [ ] T-0009: Add ESLint config with TypeScript strict rules across all workspaces
-- [ ] T-0010: Add Prettier config shared across all workspaces
+- [ ] T-0005: Create `shared/` workspace with `package.json` (`name: "@nexus/shared"`), `tsconfig.json` (`composite: true`, `declaration: true`), `src/index.ts` barrel export
+- [ ] T-0006: Configure workspace cross-references: add `"@nexus/shared": "workspace:*"` to `server/package.json` and `client/package.json` dependencies; add path alias `"@nexus/shared"` to both tsconfigs
+- [ ] T-0007: Add root-level `package.json` scripts: `"dev:server"`, `"dev:client"`, `"build"`, `"test"`, `"test:server"`, `"test:client"`, `"lint"` using pnpm `--filter` syntax
+- [ ] T-0008: Add `.gitignore` (node_modules, dist, .env, .firebase, coverage), `.editorconfig` (indent_size=2, end_of_line=lf), `.nvmrc` (`20`)
+- [ ] T-0009: Add ESLint config (`eslint.config.mjs` flat config) with `@typescript-eslint/recommended-type-checked` for all workspaces; share a root `eslint.config.base.mjs`
+- [ ] T-0010: Add `prettier.config.mjs` (singleQuote: true, trailingComma: 'all', printWidth: 100) shared across all workspaces
+- [ ] T-0010a: Create `server/.env.example` and `client/.env.example` with all required env vars (names defined in Foundation spec §11.1, values empty)
+- [ ] T-0010b: Install Vitest in `server/` (`pnpm add -D vitest @vitest/coverage-v8 supertest @types/supertest @types/express`) and create `server/vitest.config.ts`; install Vitest in `shared/` with `shared/vitest.config.ts`
+- [ ] T-0010c: Create `server/src/__tests__/setup.ts` — sets `FIRESTORE_EMULATOR_HOST=localhost:8080` and `FIREBASE_AUTH_EMULATOR_HOST=localhost:9099` env vars before test suite; reference in `vitest.config.ts` as `globalSetup`
+- [ ] T-0010d: Add `emulators` config to `firebase.json`: `{ "firestore": { "port": 8080 }, "auth": { "port": 9099 } }` — required for all integration tests
 
 ---
 
@@ -44,7 +48,7 @@
 - [ ] T-0024: Implement `Brand<T, B>` generic type with `__brand` symbol
 - [ ] T-0025: Define all 17 branded ID types: `CustomerId`, `InvoiceId`, `PaymentId`, `ExpenseId`, `ReceiptId`, `BillId`, `SubscriptionId`, `UtilityId`, `OrderId`, `PurchaseId`, `ProjectId`, `AssetId`, `InvestmentId`, `UserId`, `AccountabilityId`, `MilestoneId`, `InvoiceNumber`
 - [ ] T-0026: Implement `createId<T>(prefix)` factory function using `crypto.randomUUID()`
-- [ ] T-0027: Write compile-time tests verifying cross-assignment prevention (e.g., `CustomerId` cannot be assigned to `InvoiceId`)
+- [ ] T-0027: Verify compile-time cross-assignment prevention using `// @ts-expect-error` comments in `server/src/domain/shared/types/branded.test-types.ts`, then run `tsc --noEmit -p server/tsconfig.json` in CI — file should have no type errors (the @ts-expect-error lines suppress the intentional errors)
 
 ---
 
@@ -57,7 +61,7 @@
 - [ ] T-0032: Implement `Email` value object — `create()` with regex validation and lowercase normalization
 - [ ] T-0033: Implement `InvalidEmailError` domain error
 - [ ] T-0034: Write unit tests for `Email` — valid emails, invalid emails, normalization
-- [ ] T-0035: Implement `Phone` value object with basic validation
+- [ ] T-0035: Implement `Phone` value object — `create()` strips non-digits; validates 7–15 digits after stripping; stores normalized digit-only string; `value` getter returns digits; `display` getter returns original trimmed input
 - [ ] T-0036: Implement `Address` value object — `create()` with required field validation (street, city, postalCode, country)
 - [ ] T-0037: Implement `InvalidAddressError` domain error
 - [ ] T-0038: Implement `Percentage` value object — `create()` with 0–100 range validation, `applyTo(amount)` method
@@ -71,7 +75,7 @@
 - [ ] T-0041: Define `CommandMetadata` interface — `commandId`, `userId`, `correlationId`, `timestamp`
 - [ ] T-0042: Define `ICommandBus` interface — `execute()`, `register()`
 - [ ] T-0043: Define `ICommandHandler<TCommand>` interface — `execute(command): Promise<void>`
-- [ ] T-0044: Implement `InProcessCommandBus` — handler registry Map, dispatch with error propagation
+- [ ] T-0044: Implement `InProcessCommandBus` — handler registry `Map<string, ICommandHandler>`, `register(type, handler)`, `execute(command)` logs `{commandType, commandId, timestamp}` then calls `handler.execute(command)`, throws `Error('No handler registered for command: {type}')` if unregistered
 - [ ] T-0045: Write unit tests for `InProcessCommandBus` — register, execute, unregistered command throws
 - [ ] T-0046: Define `Query` interface — `type`, `payload`
 - [ ] T-0047: Define `IQueryBus` interface — `execute()`, `register()`
@@ -95,8 +99,9 @@
 
 ## 7. Infrastructure — Firebase
 
-- [ ] T-0058: Initialize Firebase Admin SDK (`firebaseAdmin.ts`) — service account config from environment variables
-- [ ] T-0059: Implement `FirestoreEventStore` — `save()` with Firestore transaction for optimistic concurrency, version check, event subcollection writes, post-commit event publishing
+- [ ] T-0058: Initialize Firebase Admin SDK (`firebaseAdmin.ts`) — read `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY` from `process.env`; initialize once with `initializeApp()`; export `getFirestoreDb()`, `getFirebaseAuth()`, `getFirebaseStorage()` singletons; in test environment (`FIRESTORE_EMULATOR_HOST` set), SDK auto-uses emulator
+- [ ] T-0059: Implement `FirestoreEventStore.save()` — Firestore transaction: read `events/{aggregateId}` metadata doc, compare `latestVersion` to `expectedVersion` (throw `ConcurrencyError` if mismatch), write metadata update + each event to `events/{aggregateId}/events/{eventId}` subcollection; each event document must include `aggregateType` as top-level field (for `loadByType` collectionGroup queries); publish all events to `IEventBus` post-commit
+- [ ] T-0059a: Implement `FirestoreEventStore.loadByType()` — collectionGroup query on `events` subcollection filtered by `aggregateType == aggregateType`, ordered by `metadata.timestamp ASC`; if `fromTimestamp` provided, add `where('metadata.timestamp', '>=', fromTimestamp)` filter
 - [ ] T-0060: Implement `FirestoreEventStore.load()` — read events subcollection ordered by version ASC
 - [ ] T-0061: Write integration tests for `FirestoreEventStore` — save, load, concurrency conflict rejection (409)
 - [ ] T-0062: Implement `FirestoreReadModelRepo` — `upsert()`, `update()`, `findById()`, `findMany()` with Firestore query builder, `delete()`
@@ -109,7 +114,7 @@
 
 ## 8. Infrastructure — Projection Engine
 
-- [ ] T-0067: Implement `ProjectionEngine` — `register(projection)` maps eventTypes to projection handlers, `dispatch(event)` fans out to all matching projections via `Promise.allSettled()`
+- [ ] T-0067: Implement `ProjectionEngine` — `register(projection)` maps eventTypes to projection handlers, `dispatch(event)` fans out to all matching projections via `Promise.allSettled()`, after successful dispatch writes `event.metadata.timestamp` to `db.collection('system').doc('projection_checkpoints_{projectionName}')` for replay cursor support
 - [ ] T-0068: Define `IProjection` interface — `subscribedEvents: string[]`, `handle(event): Promise<void>`
 - [ ] T-0069: Write unit tests for `ProjectionEngine` — register, dispatch to correct projections, error isolation between projections
 
@@ -117,7 +122,8 @@
 
 ## 9. Infrastructure — Express Server
 
-- [ ] T-0070: Install Express dependencies: `express`, `cors`, `helmet`, `pino`, `pino-http`, `express-rate-limit`
+- [ ] T-0070: Install Express dependencies in `server/`: `express cors helmet pino pino-http express-rate-limit` (runtime); `@types/express @types/cors @types/node` (dev)
+- [ ] T-0070a: Implement `ConcurrencyError` class — `export class ConcurrencyError extends Error { constructor(message: string) { super(message); this.name = 'ConcurrencyError'; } }` — location: `server/src/domain/shared/DomainError.ts` (alongside but separate from DomainError/ApplicationError hierarchy)
 - [ ] T-0071: Implement `requestId` middleware — generate UUID correlationId, attach to `req` and response header `X-Correlation-Id`
 - [ ] T-0072: Implement Pino structured logging middleware with correlationId context
 - [ ] T-0073: Implement `FirebaseAuthMiddleware` — extract Bearer token, verify via `firebase.auth().verifyIdToken()`, attach `userId` and decoded claims to `req.user`, skip for public routes
@@ -160,8 +166,8 @@
 
 ## 12. Shared Workspace — Validation & Constants
 
-- [ ] T-0098: Implement `shared/validation/schemas.ts` — `emailSchema`, `moneySchema`, `currencyCodeSchema`, `paginationSchema`, `addressSchema`
-- [ ] T-0099: Implement `shared/constants/enums.ts` — all shared enums (CustomerStatus, InvoiceStatus, PaymentMethod, etc.) as TypeScript string unions and Zod enums
+- [ ] T-0098: Implement `shared/src/validation/schemas.ts` — export `emailSchema`, `moneySchema`, `currencyCodeSchema`, `paginationSchema`, `addressSchema`, `phoneSchema` (min 7 digits after non-digit strip)
+- [ ] T-0099: Implement `shared/src/constants/enums.ts` — export all shared Zod enums AND TypeScript type aliases: `CustomerStatus`, `InvoiceStatus`, `PaymentMethod`, `PaymentStatus`, `ExpenseStatus`, `BillStatus`, `BillingFrequency`, `SubscriptionStatus`, `BillingCycle`, `OrderStatus`, `PurchaseStatus`, `ProjectStatus`, `AssetStatus`, `AssetCondition`, `InvestmentStatus`, `UserRole`, `UserStatus`, `AccountabilityStatus`, `AccountabilityType`, `NoteType` (values: `'note' | 'call' | 'email' | 'meeting'`)
 - [ ] T-0100: Verify shared workspace imports correctly from both `server/` and `client/` workspaces
 
 ---

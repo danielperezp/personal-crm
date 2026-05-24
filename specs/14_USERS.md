@@ -164,6 +164,26 @@ On first app launch (no users exist):
 
 ---
 
+## 7. Resolved Implementation Gaps
+
+### InviteUserDialog (V1)
+There is no `InviteUser` command in V1. `InviteUserDialog` in the frontend is display-only — it shows an email field and role selector but submits a `RegisterUser` command directly (user must already have signed up via Firebase Auth). The Owner manually creates the user record after the new user has signed in at least once (triggering first-login bootstrap). Document this in the UI with a note: "User must sign in with Firebase first."
+
+### First-User Bootstrap — Race Condition Prevention
+Use a Firestore transaction in `RegisterUserHandler`:
+1. Inside transaction: `tx.get(db.collection('system').doc('bootstrap'))`
+2. If doc `bootstrapped === true` → register as Viewer (or specified role)
+3. If doc does not exist → register as Owner, `tx.set(bootstrap doc, { bootstrapped: true, ownerId })`
+This ensures only one Owner is ever auto-created even under concurrent sign-ups.
+
+### RecordLogin Trigger
+`RecordLoginHandler` is triggered in `FirebaseAuthMiddleware` after successful token verification. The middleware receives the command bus via dependency injection (passed in `container.ts` as constructor arg). It calls `commandBus.execute(new RecordLoginCommand({ userId }))` and awaits it before calling `next()`. This adds ~50ms latency acceptable for V1.
+
+### IUserRepository Implementation Location
+`FirestoreUserRepository` is an infrastructure concern. It reads from `rm_users` (for `findByFirebaseUid` via the secondary `rm_users_by_firebase_uid` collection) and from the event store (via `IEventStore.load()`). Location: `server/src/infrastructure/repositories/FirestoreUserRepository.ts`.
+
+---
+
 ## 8. API Endpoints
 
 ```

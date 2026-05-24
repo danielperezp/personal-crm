@@ -681,6 +681,106 @@ export const addressSchema = z.object({ street: z.string().min(1), city: z.strin
 
 ---
 
+## 11.1 Implementation Notes — Resolved Gaps
+
+### Package Manager
+Use **pnpm** workspaces throughout. Root `package.json`:
+```json
+{ "packageManager": "pnpm@9.x", "workspaces": ["shared", "server", "client", "functions"] }
+```
+
+### Test Framework
+- **Backend (`server/`):** Vitest + Supertest. Config file: `server/vitest.config.ts`.
+- **Shared (`shared/`):** Vitest. Config file: `shared/vitest.config.ts`.
+- **Frontend (`client/`):** Vitest + React Testing Library.
+- Install: `pnpm add -D vitest @vitest/coverage-v8 supertest @types/supertest` in `server/`.
+
+### Environment Variables
+Backend `.env` (and `.env.example` committed, values empty):
+```
+# Firebase Admin
+FIREBASE_PROJECT_ID=
+FIREBASE_CLIENT_EMAIL=
+FIREBASE_PRIVATE_KEY=        # JSON-escaped private key string
+# Server
+PORT=4000
+NODE_ENV=development
+# CORS
+FRONTEND_ORIGIN_LOCAL=http://localhost:5173
+FRONTEND_ORIGIN_PROD=
+# Rate Limit
+RATE_LIMIT_MAX=100
+RATE_LIMIT_WINDOW_MS=900000
+```
+Frontend `.env` (Vite-prefixed):
+```
+VITE_API_BASE_URL=http://localhost:4000/api/v1
+VITE_FIREBASE_API_KEY=
+VITE_FIREBASE_AUTH_DOMAIN=
+VITE_FIREBASE_PROJECT_ID=
+VITE_FIREBASE_STORAGE_BUCKET=
+VITE_FIREBASE_MESSAGING_SENDER_ID=
+VITE_FIREBASE_APP_ID=
+```
+
+### Firebase Emulator (for integration tests)
+Integration tests (T-0061, T-0063, T-0616–T-0619) require Firebase Emulator Suite.
+- `firebase.json` must include `emulators: { firestore: { port: 8080 }, auth: { port: 9099 } }`.
+- Tests set env `FIRESTORE_EMULATOR_HOST=localhost:8080` before importing Firebase Admin SDK.
+- Test setup file `server/src/__tests__/setup.ts`: sets emulator env vars before all tests.
+- Vitest config uses `globalSetup` pointing to this file.
+
+### T-0027: Compile-Time Type Tests
+Use `// @ts-expect-error` comments in a `.test-types.ts` file checked by `tsc --noEmit`. Example:
+```typescript
+// @ts-expect-error — CustomerId cannot be assigned to InvoiceId
+const _bad: InvoiceId = 'cust_abc' as CustomerId;
+```
+Run via: `tsc --noEmit -p server/tsconfig.json` as part of the test suite.
+
+### Phone Value Object Validation
+Accept E.164 format or local format. V1 rule: strip non-digits; must be between 7 and 15 digits after stripping. Store normalized (digits only). No country code enforcement in V1.
+
+### `FirestoreEventStore.loadByType()` Implementation
+```typescript
+async loadByType(aggregateType: string, fromTimestamp?: number): Promise<DomainEvent[]> {
+  // Uses collectionGroup query on subcollection 'events'
+  // Filter by aggregateType on parent doc (requires denormalizing aggregateType onto each event doc)
+  // Events must store aggregateType field for this query to work
+  let query = this.db.collectionGroup('events')
+    .where('aggregateType', '==', aggregateType)
+    .orderBy('metadata.timestamp', 'asc');
+  if (fromTimestamp) query = query.where('metadata.timestamp', '>=', fromTimestamp);
+  const snap = await query.get();
+  return snap.docs.map(d => d.data() as DomainEvent);
+}
+```
+> **Note:** Each event document must include `aggregateType` as a top-level field (already present in `DomainEvent` interface). T-0059 must ensure `aggregateType` is written on each event subcollection document.
+
+### ConcurrencyError Class
+`ConcurrencyError` extends `Error` directly (not `DomainError` or `ApplicationError`). It is handled separately in the errorHandler as its own case → 409. This avoids it being swallowed by the DomainError catch (422).
+
+### rm_users Lookup by firebaseUid
+The `rm_users` read model document ID is `userId` (not `firebaseUid`). Auth middleware cannot look up by document ID. Solution: **add a secondary collection** `rm_users_by_firebase_uid/{firebaseUid} = { userId }` maintained by `UserListProjection` on `UserRegistered`. Auth middleware queries this first to resolve `firebaseUid → userId`, then fetches full user from `rm_users`.
+
+### InProcessCommandBus Middleware Pipeline
+T-0044 "middleware pipeline" means: command → optional logging interceptor (logs command type + timestamp) → handler. No authorization in the bus itself (auth is at HTTP layer). Implementation: just a `Map<string, ICommandHandler>` with a log call before `handler.execute()`. No plugin pattern needed in V1.
+
+### shared/ Package Build Strategy
+The `shared/` package uses TypeScript project references. `server/tsconfig.json` and `client/tsconfig.json` both reference `shared/tsconfig.json`. No separate compile step needed in dev — just ensure `shared/tsconfig.json` has `"composite": true` and `"declaration": true`. In production builds, run `tsc -b` from repo root.
+
+### NoteType Enum (from Customer spec fix)
+Add to `shared/constants/enums.ts`:
+```typescript
+export const NoteType = z.enum(['note', 'call', 'email', 'meeting']);
+export type NoteType = z.infer<typeof NoteType>;
+```
+
+### ProjectionEngine Checkpoint Support
+`ProjectionEngine.dispatch()` should write the event's `metadata.timestamp` to `/system/projection_checkpoints/{projectionName}` after successful dispatch. This allows `loadByType()` to resume from the last checkpoint.
+
+---
+
 ## 12. Acceptance Criteria
 
 - [ ] Monorepo initializes with `client/`, `server/`, `functions/`, `shared/` workspaces
